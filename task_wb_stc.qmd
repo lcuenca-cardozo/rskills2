@@ -1,0 +1,419 @@
+---
+title: "R_test_GPID_LC"
+author: "lbcc"
+format: html
+editor: visual
+df_print: paged
+---
+
+```{r,warning=FALSE,message=FALSE}
+#Load packages
+
+library(dplyr)
+library(tidyr)
+library(Hmisc) #to calculate weighted mean
+library(vtable) #to calculate weighted SD
+library(spatstat) #to calculate weighted median but didnt work
+library(robsurvey) #to calculate weighted median
+library(ggplot2)
+library(purrr)
+library(stargazer)
+library(knitr)
+library(rmarkdown)
+```
+
+## Basic Stats
+
+All the measures of this segment must be population-weighted (except for the total number of observations). Please ignore missing data (NAs). The following three tasks make use of the following file:
+
+```{r}
+tag      <- "202311081903"
+base_url <- "https://github.com/randrescastaneda/pub_data/raw/"
+data_url <- paste0(base_url, tag, "/data/Rtest1/")
+
+
+wdi <-
+  readr::read_rds(paste0(data_url, "wdi_in1.Rds"))
+```
+
+## 1. Summary statistics of GDP per capita by region
+
+This table shows some stats of GDP per capita by region and year. Total number of observations (not-weighted), mean, sd, min, and max.
+
+```{r}
+#Define dataset
+data <- 
+  readr::read_rds(paste0(data_url, "wdi_in1.Rds"))
+  #readr::read_rds(paste0(data_url, "wdi_summ_out.Rds"))
+```
+
+### Creating population weights function
+
+```{r}
+wdata <- data %>%
+  group_by(date) %>%
+  #filter(!is.na(gdp)) %>% 
+  mutate(world_pop = sum(pop)) %>% ungroup() # world population every year
+
+wdata = wdata %>% 
+  mutate(wgt = pop/world_pop) #Create weights
+
+summary(wdata$gdp) #Checking for NAs
+summary(wdata$pop) #Checking for NAs
+
+# wdata = wdata %>% #Checking for outliers
+#   mutate(outlier = ifelse(gdp > quantile(wdata$gdp, probs = 0.99, na.rm = T), 1, 0))
+ 
+wdata2 <- wdata %>% 
+  group_by(region, date) %>%
+  #filter(!is.na(gdp)) %>% 
+  summarise(
+    N = n(),
+    Mean = weighted.mean(gdp, pop),
+    #SD = sqrt(sum(wgt * (gdp - Mean)^2) / ((N - 1) / N) * sum(wgt)),
+    SD = weighted.sd(gdp, pop),
+    #SD2 = sqrt(wtd.var(gdp)),
+    Min = min(gdp),
+    Max = max(gdp)
+  )
+
+# Round all numeric columns in wdata
+wdata2 <- wdata2 %>% 
+  mutate_if(is.numeric, ~ round(., digits = 0))
+
+# print(wdata2)
+
+rmarkdown:::paged_table(wdata2)
+
+
+```
+
+### **2. Aggregate stats**
+
+Aggregate the `lifeex`, `gdp`, and `pov_intl` variables by `region` and `date`, using the mean, standard deviation, minimum, maximum, and median. You will also show the total population of each region in each year. The data should be long-formatted and population-weighted.
+
+```{r}
+wdata3 <- wdata %>%
+  group_by(region, date) %>%
+  summarise(
+    lifeex_mean = weighted.mean(lifeex, wgt),
+    lifeex_sd = weighted.sd(lifeex, wgt),
+    lifeex_min = min(lifeex, wgt),
+    lifeex_max = max(lifeex, wgt),
+    lifeex_median = weighted_median(lifeex, wgt),
+    
+    gdp_mean = weighted.mean(gdp, wgt),
+    gdp_sd = weighted.sd(gdp, wgt),
+    gdp_min = min(gdp, wgt),
+    gdp_max = max(gdp, wgt),
+    gdp_median = weighted_median(gdp, wgt),
+    
+    pov_intl_mean = weighted.mean(pov_intl, wgt),
+    pov_intl_sd = weighted.sd(pov_intl, wgt),
+    pov_intl_min = min(pov_intl, wgt),
+    pov_intl_max = max(pov_intl, wgt),
+    pov_intl_median = weighted_median(pov_intl, wgt),
+    
+    total_population = sum(pop)
+  ) %>%
+  pivot_longer(cols = starts_with(c("lifeex", "gdp", "pov_intl")),
+               names_to = c(".value", "stat"),
+               names_pattern = "^(.+)_(.+)$") %>%
+  arrange(region, date, stat)
+
+wdata3 <- wdata3 %>% 
+  arrange(factor(stat, levels=c("mean","sd","min","max","median" )))
+
+# Round all numeric columns in wdata
+wdata3 <- wdata3 %>% 
+  mutate_if(is.numeric, ~ round(., digits = 3))
+
+# Print the result
+#print(wdata3)
+
+#wdata3 %>%
+  # kbl() %>%
+  # kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+rmarkdown:::paged_table(wdata3)
+
+
+```
+
+### **3. Find outliers**
+
+Find the outliers of `lifeex`, `gpd`, and `gini` by year above and below 2.5 standard deviations from the mean. Ignore `NAs` in all your calculations. Remember to weigh by population.
+
+```{r}
+#Checking for outliers
+outliers <- wdata %>%
+  filter(!is.na(lifeex) & !is.na(gdp) & !is.na(gini)) %>%
+  group_by(date) %>%
+  mutate(
+    z_lifeex = (lifeex - weighted.mean(lifeex, w = wgt, na.rm = TRUE)) / weighted.sd(lifeex, w = wgt, na.rm = TRUE),
+    z_gdp = (gdp - weighted.mean(gdp, w = wgt, na.rm = TRUE)) / weighted.sd(gdp, w = wgt, na.rm = TRUE),
+    z_gini = (gini - weighted.mean(gini, w = wgt, na.rm = TRUE)) / weighted.sd(gini, w = wgt, na.rm = TRUE)
+  ) 
+
+outliers_summary <- outliers %>% 
+  mutate(
+    gdp.outlier = ifelse(abs(z_gdp) > 2.5, 1, 0),
+    lifeex.outlier = ifelse(abs(z_lifeex) > 2.5, 1, 0),
+    gini.outlier = ifelse(abs(z_gini) > 2.5, 1, 0)
+  ) %>%
+  group_by(date) %>%
+  summarise(
+    gdp.ub = sum(gdp.outlier == 1 & z_gdp > 2.5, na.rm = TRUE),
+    gdp.lb = sum(gdp.outlier == 1 & z_gdp < -2.5, na.rm = TRUE),
+    lifeex.ub = sum(lifeex.outlier == 1 & z_lifeex > 2.5, na.rm = TRUE),
+    lifeex.lb = sum(lifeex.outlier == 1 & z_lifeex < -2.5, na.rm = TRUE),
+    gini.ub = sum(gini.outlier == 1 & z_gini > 2.5, na.rm = TRUE),
+    gini.lb = sum(gini.outlier == 1 & z_gini < -2.5, na.rm = TRUE)
+  )
+
+outliers_by_region_date <- outliers_summary %>%
+  left_join(outliers, by = "date") %>%
+  group_by(region, date) %>%
+  summarise(
+    gdp.out = sum(gdp.ub == 1 | gdp.lb == 1, na.rm = TRUE),
+    lifeex.out = sum(lifeex.ub == 1 | lifeex.lb == 1, na.rm = TRUE),
+    gini.out = sum(gini.ub == 1 | gini.lb == 1, na.rm = TRUE)
+  )
+
+#print(outliers_by_region_date) # This table shows the total number of outliers above and below 2.5 standard deviations from the mean in every year by region.
+
+# outliers_by_region_date %>%
+#   kbl() %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+rmarkdown:::paged_table(outliers_by_region_date)
+       
+```
+
+For extra points, you can replicate the chart below using the package `{ggplot2}`. It shows the `lifeex` of each country in each year, the weighteds mean of `lifeex` per year and the 2.5 confidence interval that you already calculated
+
+```{r}
+
+# Calculate the mean and confidence interval for the entire dataset
+lifeex_mean <- weighted.mean(wdata$lifeex, w = wdata$wgt, na.rm = TRUE)
+lifeex_sd <- weighted.sd(wdata$lifeex, w = wdata$wgt, na.rm = TRUE)
+lifeex_ci <- 2.5 * lifeex_sd
+
+plotdata <- wdata %>% 
+  group_by(region, date) %>%
+  filter(!is.na(gdp)) %>% 
+  summarise(
+    country = country,
+    lifeex = lifeex
+  )
+
+plot <- ggplot(plotdata, aes(x = date, y = lifeex)) +
+  geom_point(aes(color = region), size = 0.25) +
+  geom_ribbon(aes(x = date, ymin = lifeex_mean - lifeex_ci, ymax = lifeex_mean + lifeex_ci), fill = "lightgray", alpha = 0.2) +
+  geom_smooth(yintercept= lifeex_mean, se = F, color = "blue", size = 0.2) +  
+  labs(title = "Life Expectancy (lifeex) by Year",
+       x = "Year",
+       y = "Life Expectancy (lifeex)") +
+  scale_color_discrete(name = "Region") +  
+  theme_minimal() +
+  theme(legend.position = "top")
+
+
+print(plot)
+```
+
+## **Simulated data**
+
+For the following tasks, you need to download the following data.
+
+```{r}
+l_svy <-
+    readr::read_rds(paste0(data_url, "svy_sim_in1.Rds"))
+
+```
+
+```{r}
+
+# Combine the survey data from l_svy into a single data frame
+survey_data <- l_svy %>%
+  map_df(~ as.data.frame(.x), .id = "year") %>%
+  mutate(year = as.numeric(gsub("[A-Za-z]", "", year)))
+
+# Define the poverty lines in 2017 PPP prices
+poverty_lines <- c(2.15, 3.65, 6.85)
+
+# Function to calculate the FGT indices for a given poverty line
+calculate_FGT <- function(data, line) {
+  data %>%
+    group_by(year) %>%
+    summarise(
+      Headcount_Ratio = sum(weight * (income < line)) / sum(weight),
+      Poverty_Gap = sum((1 - (income / line)) * (income < line) * weight) / sum(weight),
+      Poverty_Severity = sum((1 - (income / line))^2 * (income < line) * weight) / sum(weight)
+    ) %>%
+    mutate(Poverty_Line = line)
+}
+# Calculate the FGT indices for each poverty line and bind the results
+poverty_indicators<- poverty_lines %>%
+  map_df(~ calculate_FGT(survey_data, .))
+
+# Print the combined results data frame
+#print(poverty_indicators)
+
+# poverty_indicators %>%
+#   kbl() %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+rmarkdown:::paged_table(poverty_indicators)
+```
+
+```{r}
+
+extra2 <- ggplot(poverty_indicators, aes(group = Poverty_Line)) +
+  geom_line(aes(x = year, y = Headcount_Ratio, color = factor(Poverty_Line))) +
+  geom_point(aes(x = year, y = Headcount_Ratio, color = factor(Poverty_Line))) +
+  theme_minimal()
+
+print(extra2)
+
+```
+
+### **5. Lorenz curve**
+
+The [Lorenz curve](https://en.wikipedia.org/wiki/Lorenz_curve) is a well-known representation of income distribution in a society.
+
+```{r}
+
+#Source: https://github.com/PIP-Technical-Team/wbpip/blob/0cf9aa7bc168400ecf78ae5455f4c4247b841e9d/R/md_compute_lorenz.R
+
+data_lc <- survey_data
+
+md_compute_lorenz <- function(welfare, weight, nbins = NULL) {
+
+  nobs <- length(weight)
+  if (is.null(nbins)) {
+    # Define number of points on the Lorenz curve
+    if (nobs > 1000) nbins <- 100 else nbins <- 20
+  }
+
+  # Placeholder for Lorenz curve
+  welfare_col    <- vector(mode = "numeric", length = nbins)
+  lorenz_welfare <- vector(mode = "numeric", length = nbins)
+  lorenz_weight  <- vector(mode = "numeric", length = nbins)
+
+  # Compute Lorenz curve
+  weighted_welfare     <- weight * welfare
+  sum_weighted_welfare <- sum(weighted_welfare)
+  sum_weights          <- sum(weight)
+  welfare_step         <- sum_weights / nbins
+  next_level           <- welfare_step
+  cum_weight           <- 0 # Placeholder for cumulative weight
+  cum_welfare          <- 0 # Placeholder for cumulative welfare
+  j                    <- 1
+
+
+  for (i in seq_len(nobs)) {
+    cum_weight  <- cum_weight + weight[i] # Cumulative weight
+    cum_welfare <- cum_welfare + weighted_welfare[i] # Cumulative income
+
+    while ((cum_weight >= next_level) & (j <= nbins)) {
+      welfare_col[j]    <- welfare[i]
+      lorenz_welfare[j] <- cum_welfare / sum_weighted_welfare # Normalize cum_welfare
+      lorenz_weight[j]  <- cum_weight / sum_weights           # Normalize cum_weight
+
+      j = j + 1
+      
+      if (j <= nbins) {next_level <- welfare_step * j * 0.999999999}
+    }
+  }
+
+  lorenz <- data.frame(
+    welfare        = welfare_col,
+    lorenz_welfare = lorenz_welfare,
+    lorenz_weight  = lorenz_weight
+  )
+
+  return(lorenz)
+
+}
+
+result_lc <- data_lc %>%
+  group_by(year) %>%
+  summarise(lorenz_curve = list(md_compute_lorenz(welfare = income, weight = weight)))
+
+# Unnest the list column
+result_lc <- result_lc %>%
+  unnest(lorenz_curve)
+
+# result_lc %>%
+#   kbl() %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+rmarkdown:::paged_table(result_lc)
+
+```
+
+```{r}
+extra3 <- ggplot(result_lc, aes(group = year)) +
+  geom_line(aes(x = lorenz_weight, y = lorenz_welfare, color = factor(year))) +
+  #geom_point(aes(x = lorenz_weight, y = lorenz_welfare, color = factor(year))) +
+  theme_minimal()
+
+print(extra3)
+```
+
+### **6. Gini coefficient**
+
+Without using any auxiliary package, create a function that estimate the [Gini coefficient](https://en.wikipedia.org/wiki/Gini_coefficient). Then, estimate it for every single year.
+
+```{r}
+
+gini_data <- l_svy %>%
+  map_df(~ as.data.frame(.x), .id = "year") %>%
+  mutate(year = as.numeric(gsub("[A-Za-z]", "", year)))
+
+#Source: https://github.com/PIP-Technical-Team/wbpip/blob/0cf9aa7bc168400ecf78ae5455f4c4247b841e9d/R/md_compute_lorenz.R
+
+#Define a function to calculate gini coef for every year
+calculate_gini <- function(welfare, weight) {
+
+  
+  weighted_welfare <- welfare * weight # Compute weighted welfare
+  weighted_welfare_lag <- collapse::flag(weighted_welfare, fill = 0)
+
+  # Compute area under the curve using
+  # Area of trapezoid = Base * Average height
+  v <- (cumsum(weighted_welfare_lag) + (weighted_welfare / 2)) * weight
+  auc <- sum(v) # Area Under the Curve
+
+  # Compute Area Under the Lorenz Curve
+  # Normalize auc so it is always between 0 and 0.5
+  auc <- (auc / sum(weight)) / sum(weighted_welfare)
+
+  # Compute Gini
+  gini <- 1 - (2 * auc)
+
+  return(gini)
+}
+
+# Calculate the FGT indices for each poverty line and bind the results
+results_gini <- gini_data %>%
+  group_by(year) %>%
+  summarise(Gini = calculate_gini(income, weight))
+
+# results_gini %>%
+#   kbl() %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+rmarkdown:::paged_table(results_gini)
+
+```
+
+```{r}
+extra4 <- ggplot(results_gini, aes(x = year, y = Gini)) +
+  geom_line(color = "magenta") +
+  geom_point(color = "red") +
+  theme_minimal()
+
+print(extra4)
+```
